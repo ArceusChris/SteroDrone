@@ -2,8 +2,10 @@ import cv2
 import numpy as np
 import time
 import yaml # 用于加载/保存标定数据
+from ultralytics import YOLO # 用于无人机检测
 from pyproj import Proj, Transformer, CRS # 用于坐标转换
 from scipy.spatial.transform import Rotation as R 
+from utils.geo_transform import CoordinateTransformer # 假设你有一个 geo_transform.py 文件，包含坐标转换函数
 
 # --- 1. 标定参数加载 ---
 def load_calibration_data(calibration_file):
@@ -54,18 +56,8 @@ def capture_stereo_images(cap_left, cap_right):
 
 # --- 3. 无人机检测 (占位符) ---
 def detect_drones(image, model):
-    # 临时返回一个假数据用于测试流程
-    h, w = image.shape[:2]
-    # 模拟在图像中心附近检测到一个 50x50 的框
-    if np.random.rand() > 0.5: # 随机模拟检测到与否
-         center_x, center_y = w // 2 + np.random.randint(-50, 50), h // 2 + np.random.randint(-50, 50)
-         box_w, box_h = 50, 50
-         x = max(0, center_x - box_w // 2)
-         y = max(0, center_y - box_h // 2)
-         return [(x, y, box_w, box_h)]
-    else:
-         return []
-    # --- 模型推理代码结束 ---
+    results = model(image)
+    return results.xywh[:, :2]
 
 # --- 4. 立体匹配 (基于检测框中心) ---
 def match_stereo_points_from_detections(detections_left, detections_right, P1, P2, image_size):
@@ -144,153 +136,26 @@ def get_sensor_data():
     # --- 在这里替换为你的 GPS/IMU 读取代码 ---
     # 示例: 返回固定或随机值
     return {
-        'lat': 34.0522,  # 示例: 洛杉矶市中心纬度
-        'lon': -118.2437, # 示例: 洛杉矶市中心经度
-        'alt': 71.0,      # 示例: 海拔 (米)
+        'latitude': 34.0522,  # 示例: 洛杉矶市中心纬度
+        'lontitude': -118.2437, # 示例: 洛杉矶市中心经度
+        'altitude': 71.0,      # 示例: 海拔 (米)
         'roll': 0.0,     # 示例: 横滚角 (度)
         'pitch': 90.0,    # 示例: 俯仰角 (度) - 朝天为90度
-        'yaw': 45.0      # 示例: 偏航角 (度) - 相机Y轴相对于正北方向的角度
+        'yaw': 180.0      # 示例: 偏航角 (度) - 相机Y轴相对于正北方向的角度
     }
     # --- GPS/IMU 代码结束 ---
 
-# --- 7. 坐标系转换 ---
-def transform_to_gps(drone_cam_coords, sensor_data):
-    """
-    将无人机在相机坐标系下的坐标 (X, Y, Z) 转换到大地坐标系 (经纬高)。
-    输入: drone_cam_coords (np.array [X, Y, Z]) - 相机坐标系下的坐标 (米)
-          sensor_data (dict) - 包含相机平台 GPS 和 IMU 信息的字典
-    输出: dict {'lat': float, 'lon': float, 'alt': float} or None
-    """
-    try:
-        X, Y, Z = drone_cam_coords
-        cam_lat = sensor_data['lat']
-        cam_lon = sensor_data['lon']
-        cam_alt = sensor_data['alt']
-        # 确保角度是弧度
-        roll = np.radians(sensor_data['roll'])
-        pitch = np.radians(sensor_data['pitch'])
-        yaw = np.radians(sensor_data['yaw']) # 相对于正北方向
-
-        # 1. 定义坐标系
-        # WGS84 Geodetic (lat/lon/alt)
-        crs_geodetic = CRS("EPSG:4326") # 经纬度
-        crs_geodetic_alt = CRS("EPSG:4979") # 经纬度+海拔 (WGS84 3D)
-        # ECEF (Earth-Centered, Earth-Fixed)
-        crs_ecef = CRS("EPSG:4978")
-        
-        # Transformer: Geodetic -> ECEF
-        transformer_geo_to_ecef = Transformer.from_crs(crs_geodetic_alt, crs_ecef, always_xy=True)
-        # Transformer: ECEF -> Geodetic
-        transformer_ecef_to_geo = Transformer.from_crs(crs_ecef, crs_geodetic_alt, always_xy=True)
-
-        # 2. 计算相机在 ECEF 中的位置
-        cam_ecef_x, cam_ecef_y, cam_ecef_z = transformer_geo_to_ecef.transform(cam_lon, cam_lat, cam_alt)
-        cam_ecef_pos = np.array([cam_ecef_x, cam_ecef_y, cam_ecef_z])
-
-        # 3. 计算从相机坐标系到 ENU (East-North-Up) 或 NED (North-East-Down) 的旋转矩阵
-        # 注意：旋转顺序和定义很重要 (e.g., ZYX, XYZ)。这里假设是常见的航空 ZYX 顺序 (Yaw, Pitch, Roll)
-        # 并且假设相机坐标系：Z轴沿光轴向前，Y轴向下，X轴向右
-        # 如果相机竖直朝天 (pitch=90)，这个标准航空定义可能需要调整，
-        # 或者直接定义相机坐标系到本地水平坐标系 (ENU/NED) 的旋转。
-
-        # 假设一个更直接的定义：
-        # 相机坐标系 (Cam): Z朝天, Y朝前(某个方向), X朝右 (相对于Y)
-        # 本地水平坐标系 (ENU): X (East), Y (North), Z (Up)
-        # 需要构建从 Cam 到 ENU 的旋转矩阵 R_enu_from_cam
-        
-        # --- 这部分旋转矩阵的构建非常关键，需要根据你的具体相机安装和IMU输出定义 ---
-        # 示例：假设相机Z轴严格朝上，相机Y轴指向地理北(Yaw=0)，相机X轴指向地理东(Roll=0)
-        # 这是一个理想情况，实际需要用IMU的 roll, pitch, yaw 来构建精确的旋转矩阵
-        # from scipy.spatial.transform import Rotation as R
-        # r = R.from_euler('zyx', [yaw, pitch, roll], degrees=False) 
-        # R_ned_from_body = r.as_matrix() # 假设IMU输出的是载具(body)到NED的旋转
-        # R_body_from_cam = ... # 需要知道相机如何安装在载具上
-        # R_ned_from_cam = R_ned_from_body @ R_body_from_cam
-        
-        # 简化示例：假设已知 Cam 到 ENU 的旋转 R_enu_from_cam (需要根据实际情况计算)
-        # 例如，如果相机 Z 指向 Up，Y 指向 North，X 指向 East (理想朝天)
-        # R_enu_from_cam = np.identity(3) 
-        # 如果相机 Z 指向 Up，Y 指向 East，X 指向 North
-        # R_enu_from_cam = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]]) 
-        
-        # 使用 scipy.spatial.transform.Rotation (推荐)
-        from scipy.spatial.transform import Rotation as R
-
-        # 假设 IMU 提供了从 NED 到 Body(载具) 的旋转四元数或欧拉角
-        # 假设相机安装在载具上，其坐标系 (Cam) 相对于载具坐标系 (Body) 的旋转是 R_body_from_cam
-        # 例如：相机光轴(Z)对准载具Z轴，相机Y轴对准载具Y轴，相机X轴对准载具X轴
-        # R_body_from_cam = np.identity(3) 
-        # 如果相机光轴(Z)对准载具X轴, 相机Y轴对准载具-Z轴, 相机X轴对准载具Y轴
-        # R_body_from_cam = np.array([[0, 0, 1], [1, 0, 0], [0, -1, 0]]).T # .T because we want body_from_cam
-
-        # 假设我们有从 Body 到 NED 的旋转矩阵 R_ned_from_body (由IMU的roll,pitch,yaw计算得到)
-        # roll, pitch, yaw 单位是弧度
-        r_imu = R.from_euler('zyx', [yaw, pitch, roll]) # 注意欧拉角顺序
-        R_ned_from_body = r_imu.as_matrix()
-
-        # 假设相机就是载具 (Body == Cam) 且 Z 轴朝天 (Pitch=pi/2), Y轴朝北 (Yaw=0)
-        # 这只是一个非常简化的例子
-        R_enu_from_cam = np.array([ # Cam (X右, Y前, Z上) -> ENU (X东, Y北, Z上)
-             [1, 0, 0], # ENU East = Cam X
-             [0, 1, 0], # ENU North = Cam Y
-             [0, 0, 1]  # ENU Up = Cam Z
-        ])
-        # *** 实际应用中必须根据IMU和相机安装精确计算此旋转矩阵 ***
-        
-        # 4. 将无人机在相机坐标系的位置向量旋转到 ENU 坐标系
-        drone_cam_vec = np.array([X, Y, Z])
-        drone_enu_vec = R_enu_from_cam @ drone_cam_vec
-        delta_east, delta_north, delta_up = drone_enu_vec
-
-        # 5. 计算无人机在 ECEF 中的位置
-        # 近似方法 (适用于短距离): 使用局部ENU坐标系原点(相机位置)的转换矩阵
-        # 更精确的方法：直接在ECEF中应用位移，但需要考虑从ENU到ECEF的旋转（取决于纬度）
-        
-        # 使用 pyproj 的近似方法 (将 ENU 位移添加到相机位置)
-        # 定义一个以相机位置为中心的局部坐标系 (例如 Transverse Mercator 或 LCC)
-        # 或者，直接使用 ECEF 进行矢量相加（需要将 ENU 向量转换到 ECEF 方向）
-        
-        # 简化的近似：直接将 ENU 位移加到相机经纬高上 (误差较大，尤其纬度)
-        # 不推荐，但作为概念演示：
-        # meters_per_degree_lat = 111132.954 - 559.822 * np.cos(2 * np.radians(cam_lat)) + 1.175 * np.cos(4 * np.radians(cam_lat))
-        # meters_per_degree_lon = 111412.84 * np.cos(np.radians(cam_lat)) - 93.5 * np.cos(3 * np.radians(cam_lat))
-        # drone_lat = cam_lat + delta_north / meters_per_degree_lat
-        # drone_lon = cam_lon + delta_east / meters_per_degree_lon
-        # drone_alt = cam_alt + delta_up
-        
-        # 推荐：使用 pyproj 进行精确转换 (涉及到局部坐标系或ECEF旋转)
-        # 步骤：Cam Geodetic -> Cam ECEF -> 计算局部ENU基向量在ECEF中的表示 ->
-        #       -> 将 drone_enu_vec 转换到 ECEF 偏移 -> Cam ECEF + Offset ECEF = Drone ECEF ->
-        #       -> Drone ECEF -> Drone Geodetic
-        
-        # pyproj 提供了一个更直接的方式（内部处理了局部转换）
-        # 定义一个基于相机位置的局部 Azimuthal Equidistant (AEQD) 坐标系
-        aeqd_crs = CRS(proj='aeqd', lat_0=cam_lat, lon_0=cam_lon, datum='WGS84', units='m')
-        # Transformer: ENU (在AEQD中近似为x,y,z) -> Geodetic
-        transformer_local_to_geo = Transformer.from_crs(aeqd_crs, crs_geodetic_alt, always_xy=True)
-        
-        # 转换 ENU 坐标 (delta_east, delta_north, delta_up) 到目标经纬高
-        # 注意：AEQD 的 x, y 通常对应 easting, northing
-        drone_lon, drone_lat, drone_alt_relative = transformer_local_to_geo.transform(delta_east, delta_north, delta_up)
-        drone_alt = cam_alt + delta_up # AEQD 通常不直接处理高程，我们手动加上
-        
-        return {'lat': drone_lat, 'lon': drone_lon, 'alt': drone_alt}
-
-    except Exception as e:
-        print(f"坐标转换出错: {e}")
-        return None
-
 # --- 主函数 ---
 def main():
-    calibration_file = 'stereo_calibration.yaml' # 标定结果保存的文件
-    # model_path = 'path/to/your/drone_detection_model.onnx' # 或 .pt, .pb 等
+    calibration_file = 'params/stereo_calibration.yaml' # 标定结果保存的文件
+    model_path = 'models/yolo11s.pt' # 或 .pt, .pb 等
 
     # 1. 加载标定参数
     calib_params = load_calibration_data(calibration_file)
     if not calib_params: return
     (cam_matrix_left, dist_coeffs_left, cam_matrix_right, dist_coeffs_right, 
      R_stereo, T_stereo, R1, R2, P1, P2, Q, image_size, roi_left, roi_right) = calib_params
-
+    geo_transformer = CoordinateTransformer(sensor_data=get_sensor_data()) # 假设你有一个坐标转换器类
     # 2. 初始化相机
     cap_left = cv2.VideoCapture(0) # 调整索引
     cap_right = cv2.VideoCapture(1) # 调整索引
@@ -302,7 +167,7 @@ def main():
     # 3. 加载无人机检测模型 (占位符)
     print("加载无人机检测模型... (占位符)")
     # detection_model = load_my_model(model_path) 
-    detection_model = None # 替换为实际模型加载
+    detection_model = YOLO(model_path) # 替换为实际模型加载
     print("模型加载完成。")
 
     # 4. 计算立体校正映射 (只需一次)
@@ -350,14 +215,8 @@ def main():
                 cv2.putText(display_frame, f"Dist: {Z:.1f}m", (int(point_left[0]), int(point_left[1]) - 30), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
 
-                # 11. 获取传感器数据 (GPS, IMU)
-                sensor_data = get_sensor_data()
-                if not sensor_data:
-                    print("警告：无法获取传感器数据。")
-                    continue
-
                 # 12. 坐标转换 (相机系 -> 经纬高)
-                drone_gps_coords = transform_to_gps(drone_cam_coords, sensor_data)
+                drone_gps_coords = geo_transformer(drone_cam_coords)
 
                 if drone_gps_coords:
                     lat = drone_gps_coords['lat']

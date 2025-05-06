@@ -6,7 +6,7 @@ import yaml
 
 # --- 配置参数 ---
 CHESSBOARD_SIZE = (10, 7)   # 棋盘格内部角点数量 (必须与 capture 脚本一致)
-SQUARE_SIZE = 0.015        # 棋盘格方块的实际边长 (米)。请务必测量并修改此值！
+SQUARE_SIZE = 0.020        # 棋盘格方块的实际边长 (米)。请务必测量并修改此值！
 
 IMAGE_DIR_BASE = "calib_images" # 保存标定图像的基础目录
 IMAGE_DIR_LEFT = os.path.join(IMAGE_DIR_BASE, "left")

@@ -186,7 +186,7 @@ def init_zed_camera(resolution=sl.RESOLUTION.HD720, fps=30):
 
 def capture_stereo_images_zed(zed_camera):
     """
-    从ZED相机捕获左右立体图像
+    使用ZED SDK同步捕获左右立体图像，确保两帧严格同步
     
     参数:
         zed_camera (sl.Camera): 初始化后的ZED相机对象
@@ -198,9 +198,11 @@ def capture_stereo_images_zed(zed_camera):
     left_image = sl.Mat()
     right_image = sl.Mat()
     
-    # 抓取一帧，并检索图像
+    # 抓取一帧（同步采集）
     if zed_camera.grab() == sl.ERROR_CODE.SUCCESS:
-        # 获取左右相机图像
+        # 获取当前帧的时间戳（可选，用于更严格的同步需求）
+        timestamp = zed_camera.get_timestamp(sl.TIME_REFERENCE.IMAGE)
+        # 同步检索左右图像
         zed_camera.retrieve_image(left_image, sl.VIEW.LEFT)
         zed_camera.retrieve_image(right_image, sl.VIEW.RIGHT)
         
@@ -210,7 +212,7 @@ def capture_stereo_images_zed(zed_camera):
         
         return left_cv, right_cv
     else:
-        print("错误：无法从ZED相机获取图像。")
+        print("错误：无法从ZED相机同步获取图像。")
         return None, None
 
 def detect_drones(image, model):

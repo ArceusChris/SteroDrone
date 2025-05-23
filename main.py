@@ -24,6 +24,7 @@ from pyproj import Proj, Transformer, CRS
 from scipy.spatial.transform import Rotation as R
 from utils.geo_transform import CoordinateTransformer
 from utils.stereo_matcher import StereoMatcher
+from utils.drone_tracker import DroneTracker # Added import
 
 def load_calibration_data(zed_camera=None, calibration_file=None):
     """
@@ -295,7 +296,7 @@ def visualize_detections(frame, detections, drone_info=None):
     
     参数:
         frame (ndarray): 输入图像
-        detections (ndarray): 检测结果，格式为 [[x, y, w, h], ...]
+        detections (ndarray): 检测结果，格式为 [[x_center, y_center, w, h, track_id], ...]
         drone_info (dict, optional): 无人机信息，如距离、GPS位置等
     
     返回:
@@ -304,10 +305,24 @@ def visualize_detections(frame, detections, drone_info=None):
     display_frame = frame.copy()
     
     # 绘制检测框
-    for (x, y, w, h) in detections:
-        x, y, w, h = int(x), int(y), int(w), int(h)
+    for detection in detections: # Modified to iterate through detections
+        if len(detection) == 5: # Check if track_id is present
+            x_center, y_center, w, h, track_id = detection
+            label = f'Drone {int(track_id)}'
+        elif len(detection) == 4: # Fallback if no track_id (e.g. DeepSORT disabled)
+            x_center, y_center, w, h = detection
+            label = 'Drone'
+        else:
+            continue # Skip malformed detections
+
+        # Convert center_x, center_y, w, h to x1, y1 (top-left)
+        x = int(x_center - w / 2)
+        y = int(y_center - h / 2)
+        w = int(w)
+        h = int(h)
+        
         cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        cv2.putText(display_frame, 'Drone', (x, y - 10), 
+        cv2.putText(display_frame, label, (x, y - 10), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     
     # 如果有额外信息，在图像上显示
@@ -332,6 +347,7 @@ def main():
     # --- 配置参数 ---
     model_path = 'models/yolo11s.pt'
     backup_calibration_file = 'params/stereo_calibration.yaml'  # 备用标定文件
+    reid_model_path = 'models/osnet_x0_25_msmt17.pt' # Path for DeepSORT ReID model
     
     # --- 1. 初始化ZED相机（禁用深度功能） ---
     zed = init_zed_camera(resolution=sl.RESOLUTION.HD720, fps=30)
@@ -363,12 +379,15 @@ def main():
     stereo_matcher = StereoMatcher(image_size, P1, P2)
     
     # --- 5. 加载无人机检测模型 ---
-    print("加载无人机检测模型...")
+    print("Initializing Drone Tracker (YOLO + DeepSORT)...")
     try:
-        detection_model = YOLO(model_path)
-        print("模型加载完成。")
+        # detection_model = YOLO(model_path) # Original YOLO model loading
+        # Initialize the new DroneTracker
+        drone_tracker_left = DroneTracker(yolo_model_path=model_path, reid_model_path=reid_model_path)
+        drone_tracker_right = DroneTracker(yolo_model_path=model_path, reid_model_path=reid_model_path)
+        print("Drone Tracker initialized.")
     except Exception as e:
-        print(f"模型加载失败: {e}")
+        print(f"Drone Tracker initialization failed: {e}")
         zed.close()
         return
 
@@ -393,13 +412,19 @@ def main():
             # cv2.imshow('Rectified Stereo Images', combined_rect)
 
             # --- 8. 无人机检测 ---
-            detections_left = detect_drones(frame_left_rect, detection_model) 
-            detections_right = detect_drones(frame_right_rect, detection_model)
+            # detections_left = detect_drones(frame_left_rect, detection_model) 
+            # detections_right = detect_drones(frame_right_rect, detection_model)
+            
+            # Use DroneTracker for detection and tracking
+            tracked_objects_left, raw_detections_left = drone_tracker_left.update(frame_left_rect)
+            tracked_objects_right, raw_detections_right = drone_tracker_right.update(frame_right_rect)
+
 
             # --- 9. 立体匹配 ---
-            # 使用自定义StereoMatcher类处理匹配
+            # Use raw_detections_left (xywh format) for stereo matching, as it's the direct output from YOLO
+            # The tracked_objects_left contains track_id, which is useful for visualization
             matched_pairs = stereo_matcher.match(
-                detections_left, detections_right, strategy='auto')
+                raw_detections_left, raw_detections_right, strategy='auto')
 
             # 用于显示的信息
             drone_info = {}
@@ -435,7 +460,7 @@ def main():
                               f"Alt={drone_gps_coords['alt']:.2f}m")
 
             # --- 13. 可视化结果 ---
-            display_frame = visualize_detections(frame_left_rect, detections_left, drone_info)
+            display_frame = visualize_detections(frame_left_rect, tracked_objects_left, drone_info) # Use tracked_objects_left for visualization
             
             # 添加FPS信息
             end_time = time.time()

@@ -42,13 +42,12 @@ class StereoMatcher:
         参数:
             detections_left (ndarray): 左图像检测结果，格式 [[x, y, w, h], ...]
             detections_right (ndarray): 右图像检测结果，格式 [[x, y, w, h], ...]
-            
-        返回:
+              返回:
             list: 匹配对列表 [(point_left, point_right), ...] 
                  point 是图像像素坐标 (u, v)
         """
         matched_pairs = []
-        if not detections_left or not detections_right:
+        if len(detections_left) == 0 or len(detections_right) == 0:
             return matched_pairs
 
         # 提取检测框中心点
@@ -128,9 +127,8 @@ class StereoMatcher:
                 - 'auto': 自动选择策略（默认）
             
         返回:
-            list: 匹配对列表 [(point_left, point_right), ...]
-        """
-        if not detections_left or not detections_right:
+            list: 匹配对列表 [(point_left, point_right), ...]        """
+        if len(detections_left) == 0 or len(detections_right) == 0:
             return []
             
         # 根据场景自动选择策略

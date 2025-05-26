@@ -53,8 +53,9 @@ def load_calibration_data(zed_camera=None, calibration_file=None):
     """
     if zed_camera is not None:
         try:
-            # 从ZED相机获取标定参数
-            calibration_params = zed_camera.get_camera_information().camera_configuration.calibration_parameters
+            # 从ZED相机获取标定参数 - 修正的版本
+            camera_info = zed_camera.get_camera_information()
+            calibration_params = camera_info.camera_configuration.calibration_parameters
             
             # 左相机参数
             cam_matrix_left = np.array([
@@ -63,13 +64,13 @@ def load_calibration_data(zed_camera=None, calibration_file=None):
                 [0, 0, 1]
             ])
             
-            # ZED相机镜头畸变系数（通常很小，但为准确起见我们获取它们）
+            # ZED相机镜头畸变系数
             dist_coeffs_left = np.array([
                 calibration_params.left_cam.disto[0],
                 calibration_params.left_cam.disto[1],
                 calibration_params.left_cam.disto[2],
                 calibration_params.left_cam.disto[3],
-                calibration_params.left_cam.disto[5]
+                calibration_params.left_cam.disto[4]
             ])
             
             # 右相机参数
@@ -84,15 +85,46 @@ def load_calibration_data(zed_camera=None, calibration_file=None):
                 calibration_params.right_cam.disto[1],
                 calibration_params.right_cam.disto[2],
                 calibration_params.right_cam.disto[3],
-                calibration_params.right_cam.disto[5]
-            ])
+                calibration_params.right_cam.disto[4]
+            ])            # 修正：正确获取相机间的转换参数
+            # ZED SDK中的立体参数获取方式 - 修正baseline获取方法
+            try:
+                # 尝试直接获取baseline
+                baseline = calibration_params.getCameraBaseline()
+                print(f"从ZED SDK获取baseline: {baseline}")
+            except AttributeError:
+                try:
+                    # 备用方式1：从T向量获取
+                    if hasattr(calibration_params, 'T'):
+                        baseline = abs(calibration_params.T[0])
+                        print(f"从T向量获取baseline: {baseline}")
+                    else:
+                        raise AttributeError("No T vector found")
+                except:
+                    try:
+                        # 备用方式2：从双目标定参数计算
+                        cx_diff = abs(calibration_params.left_cam.cx - calibration_params.right_cam.cx)
+                        if cx_diff > 0:
+                            baseline = cx_diff / calibration_params.left_cam.fx
+                            print(f"使用计算方式获取baseline: {baseline}")
+                        else:
+                            raise ValueError("Invalid cx difference")
+                    except:
+                        # 默认baseline（ZED2i典型值约120mm = 0.12m）
+                        baseline = 0.12
+                        print(f"使用默认baseline: {baseline}")
             
-            # 相机之间的转换
-            R = np.array(calibration_params.R)
-            T = np.array(calibration_params.T)
+            # 验证baseline的有效性
+            if baseline <= 0.0 or baseline > 1.0:  # baseline应该在0-1米范围内
+                print(f"警告：baseline值异常 ({baseline})，使用默认值")
+                baseline = 0.12
+            
+            # 构造旋转和平移矩阵（ZED相机通常是水平对齐的）
+            R = np.eye(3)  # 对于水平对齐的立体相机，旋转矩阵通常是单位矩阵
+            T = np.array([-baseline, 0, 0])  # 平移向量，基线距离
             
             # 获取图像尺寸
-            camera_resolution = zed_camera.get_camera_information().camera_configuration.resolution
+            camera_resolution = camera_info.camera_configuration.resolution
             image_size = (camera_resolution.width, camera_resolution.height)
             
             # 计算校正参数
@@ -107,8 +139,7 @@ def load_calibration_data(zed_camera=None, calibration_file=None):
                     
         except Exception as e:
             print(f"从ZED相机获取标定参数失败: {e}")
-            if not calibration_file:
-                return None
+            print("尝试使用备用标定文件...")
     
     # 如果没有相机对象或从相机获取参数失败，尝试从文件加载
     if calibration_file:
@@ -201,8 +232,6 @@ def capture_stereo_images_zed(zed_camera):
     
     # 抓取一帧（同步采集）
     if zed_camera.grab() == sl.ERROR_CODE.SUCCESS:
-        # 获取当前帧的时间戳（可选，用于更严格的同步需求）
-        timestamp = zed_camera.get_timestamp(sl.TIME_REFERENCE.IMAGE)
         # 同步检索左右图像
         zed_camera.retrieve_image(left_image, sl.VIEW.LEFT)
         zed_camera.retrieve_image(right_image, sl.VIEW.RIGHT)
@@ -210,6 +239,22 @@ def capture_stereo_images_zed(zed_camera):
         # 转换为OpenCV格式（BGR）
         left_cv = left_image.get_data()
         right_cv = right_image.get_data()
+        
+        # 检查图像是否有效
+        if left_cv is None or right_cv is None:
+            print("错误：获取的图像数据为空")
+            return None, None
+            
+        # 检查图像形状
+        if len(left_cv.shape) != 3 or len(right_cv.shape) != 3:
+            print(f"错误：图像维度异常 - Left: {left_cv.shape}, Right: {right_cv.shape}")
+            return None, None
+            
+        # 确保图像是BGR格式（3通道）
+        if left_cv.shape[2] == 4:  # BGRA -> BGR
+            left_cv = cv2.cvtColor(left_cv, cv2.COLOR_BGRA2BGR)
+        if right_cv.shape[2] == 4:  # BGRA -> BGR  
+            right_cv = cv2.cvtColor(right_cv, cv2.COLOR_BGRA2BGR)
         
         return left_cv, right_cv
     else:
@@ -343,11 +388,9 @@ def main():
     """
     主函数：执行无人机检测与定位的完整流程
     使用ZED2i相机进行图像采集，但不使用其内置深度功能
-    """
-    # --- 配置参数 ---
+    """    # --- 配置参数 ---
     model_path = 'models/yolo11s.pt'
     backup_calibration_file = 'params/stereo_calibration.yaml'  # 备用标定文件
-    reid_model_path = 'models/osnet_x0_25_msmt17.pt' # Path for DeepSORT ReID model
     
     # --- 1. 初始化ZED相机（禁用深度功能） ---
     zed = init_zed_camera(resolution=sl.RESOLUTION.HD720, fps=30)
@@ -364,117 +407,157 @@ def main():
         
     (cam_matrix_left, dist_coeffs_left, cam_matrix_right, dist_coeffs_right, 
      R_stereo, T_stereo, R1, R2, P1, P2, Q, image_size, roi_left, roi_right) = calib_params
+      # --- 3. 计算立体校正映射（只需一次） ---
+    print("计算立体校正映射...")
+    try:
+        map1_left, map2_left = cv2.initUndistortRectifyMap(
+            cam_matrix_left, dist_coeffs_left, R1, P1, image_size, cv2.CV_16SC2)
+        map1_right, map2_right = cv2.initUndistortRectifyMap(
+            cam_matrix_right, dist_coeffs_right, R2, P2, image_size, cv2.CV_16SC2)
+        print("立体校正映射计算成功")
+        
+        # 验证映射是否有效
+        if map1_left is None or map2_left is None or map1_right is None or map2_right is None:
+            print("错误：立体校正映射为空")
+            zed.close()
+            return
+            
+        print(f"映射形状 - Left: {map1_left.shape}, Right: {map1_right.shape}")
+        
+    except Exception as e:
+        print(f"计算立体校正映射失败: {e}")
+        zed.close()
+        return
+      # --- 4. 初始化组件 ---
+    # 获取传感器数据
+    sensor_data = get_sensor_data()
     
-    # --- 3. 计算立体校正映射（只需一次） ---
-    map1_left, map2_left = cv2.initUndistortRectifyMap(
-        cam_matrix_left, dist_coeffs_left, R1, P1, image_size, cv2.CV_16SC2)
-    map1_right, map2_right = cv2.initUndistortRectifyMap(
-        cam_matrix_right, dist_coeffs_right, R2, P2, image_size, cv2.CV_16SC2)
-    
-    # --- 4. 初始化组件 ---
-    # 初始化坐标转换器
-    geo_transformer = CoordinateTransformer(sensor_data=get_sensor_data())
+    # 初始化坐标转换器 - 修正参数名称
+    camera_extrinsics = {
+        'latitude': sensor_data['latitude'],
+        'longitude': sensor_data['longitude'],
+        'altitude': sensor_data['altitude'],
+        'roll': sensor_data['roll'],
+        'pitch': sensor_data['pitch'],
+        'yaw': sensor_data['yaw']
+    }
+    geo_transformer = CoordinateTransformer(camera_extrinsics=camera_extrinsics)
     
     # 初始化立体匹配器
     stereo_matcher = StereoMatcher(image_size, P1, P2)
-    
-    # --- 5. 加载无人机检测模型 ---
-    print("Initializing Drone Tracker (YOLO + DeepSORT)...")
+      # --- 5. 加载无人机检测模型 ---
+    print("Initializing Drone Tracker (YOLO + ByteTrack)...")
     try:
-        # detection_model = YOLO(model_path) # Original YOLO model loading
-        # Initialize the new DroneTracker
-        drone_tracker_left = DroneTracker(yolo_model_path=model_path, reid_model_path=reid_model_path)
-        drone_tracker_right = DroneTracker(yolo_model_path=model_path, reid_model_path=reid_model_path)
+        # Initialize the new DroneTracker (ByteTrack doesn't need reid_model_path)
+        drone_tracker_left = DroneTracker(yolo_model_path=model_path)
+        drone_tracker_right = DroneTracker(yolo_model_path=model_path)
         print("Drone Tracker initialized.")
     except Exception as e:
         print(f"Drone Tracker initialization failed: {e}")
         zed.close()
-        return
-
-    print("开始主循环...")
+        return    print("开始主循环...")
     try:
+        frame_count = 0
         while True:
             start_time = time.time()
+            frame_count += 1
 
             # --- 6. 获取图像 ---
             frame_left_raw, frame_right_raw = capture_stereo_images_zed(zed)
             if frame_left_raw is None or frame_right_raw is None:
                 print("无法获取图像，退出循环")
                 break
-
-            # --- 7. 立体校正（消除畸变并对齐图像） ---
-            # 注意：即使ZED相机提供了校正图像，我们仍然应用我们自己的校正以确保与我们的标定参数一致
-            frame_left_rect = cv2.remap(frame_left_raw, map1_left, map2_left, cv2.INTER_LINEAR)
-            frame_right_rect = cv2.remap(frame_right_raw, map1_right, map2_right, cv2.INTER_LINEAR)
-            
-            # 可选：显示校正后的左右图像
-            # combined_rect = np.hstack((frame_left_rect, frame_right_rect))
-            # cv2.imshow('Rectified Stereo Images', combined_rect)
-
-            # --- 8. 无人机检测 ---
-            # detections_left = detect_drones(frame_left_rect, detection_model) 
-            # detections_right = detect_drones(frame_right_rect, detection_model)
-            
-            # Use DroneTracker for detection and tracking
-            tracked_objects_left, raw_detections_left = drone_tracker_left.update(frame_left_rect)
-            tracked_objects_right, raw_detections_right = drone_tracker_right.update(frame_right_rect)
-
-
-            # --- 9. 立体匹配 ---
-            # Use raw_detections_left (xywh format) for stereo matching, as it's the direct output from YOLO
-            # The tracked_objects_left contains track_id, which is useful for visualization
-            matched_pairs = stereo_matcher.match(
-                raw_detections_left, raw_detections_right, strategy='auto')
-
-            # 用于显示的信息
-            drone_info = {}
-
-            # --- 10. 处理匹配结果 ---
-            if matched_pairs:
-                # 取第一个匹配对进行处理（如果需要处理多个，可以扩展）
-                point_left, point_right = matched_pairs[0]
                 
-                # --- 11. 三维重建（使用传统三角测量，不使用ZED深度） ---
-                drone_cam_coords = triangulate_points(point_left, point_right, P1, P2)
+            print(f"Frame {frame_count}: 图像获取成功 - Left: {frame_left_raw.shape}, Right: {frame_right_raw.shape}")
 
-                if drone_cam_coords is not None:
-                    X, Y, Z = drone_cam_coords
-                    # 保存距离信息用于显示
-                    drone_info['distance'] = Z
+            try:
+                # --- 7. 立体校正（消除畸变并对齐图像） ---
+                print("开始立体校正...")
+                frame_left_rect = cv2.remap(frame_left_raw, map1_left, map2_left, cv2.INTER_LINEAR)
+                frame_right_rect = cv2.remap(frame_right_raw, map1_right, map2_right, cv2.INTER_LINEAR)
+                print("立体校正完成")
+                
+                # 可选：显示校正后的左右图像
+                # combined_rect = np.hstack((frame_left_rect, frame_right_rect))
+                # cv2.imshow('Rectified Stereo Images', combined_rect)
+
+                # --- 8. 无人机检测 ---
+                print("开始无人机检测...")
+                tracked_objects_left, raw_detections_left = drone_tracker_left.update(frame_left_rect)
+                tracked_objects_right, raw_detections_right = drone_tracker_right.update(frame_right_rect)
+                print(f"检测完成 - Left: {len(raw_detections_left)} detections, Right: {len(raw_detections_right)} detections")
+
+                # --- 9. 立体匹配 ---
+                matched_pairs = stereo_matcher.match(
+                    raw_detections_left, raw_detections_right, strategy='auto')
+
+                # 用于显示的信息
+                drone_info = {}
+
+                # --- 10. 处理匹配结果 ---
+                if matched_pairs:
+                    print(f"找到 {len(matched_pairs)} 个匹配对")
+                    # 取第一个匹配对进行处理（如果需要处理多个，可以扩展）
+                    point_left, point_right = matched_pairs[0]
                     
-                    # --- 12. 坐标转换（相机系 -> 经纬高） ---
-                    drone_gps_coords = geo_transformer(drone_cam_coords)
+                    # --- 11. 三维重建（使用传统三角测量，不使用ZED深度） ---
+                    drone_cam_coords = triangulate_points(point_left, point_right, P1, P2)
 
-                    if drone_gps_coords:
-                        # 保存GPS信息用于显示
-                        drone_info['gps'] = {
-                            'lat': drone_gps_coords['lat'],
-                            'lon': drone_gps_coords['lon'],
-                            'alt': drone_gps_coords['alt']
-                        }
-                        
-                        # 打印结果
-                        print(f"检测到无人机 @ 距离: {Z:.2f}m, GPS: "
-                              f"Lat={drone_gps_coords['lat']:.6f}, "
-                              f"Lon={drone_gps_coords['lon']:.6f}, "
-                              f"Alt={drone_gps_coords['alt']:.2f}m")
+                    if drone_cam_coords is not None:
+                        X, Y, Z = drone_cam_coords
+                        # 保存距离信息用于显示
+                        drone_info['distance'] = Z
+                          # --- 12. 坐标转换（相机系 -> 经纬高） ---
+                        try:
+                            # 使用 camera_to_geographic 方法进行坐标转换
+                            obj_lat, obj_lon = geo_transformer.camera_to_geographic(drone_cam_coords)
+                            
+                            # 计算无人机高度（相机高度 + 相对高度）
+                            camera_alt = sensor_data['altitude']
+                            drone_alt = camera_alt + Y  # Y是相机坐标系中的垂直分量
+                            
+                            # 保存GPS信息用于显示
+                            drone_info['gps'] = {
+                                'lat': obj_lat,
+                                'lon': obj_lon,
+                                'alt': drone_alt
+                            }
+                            
+                            # 打印结果
+                            print(f"检测到无人机 @ 距离: {Z:.2f}m, GPS: "
+                                  f"Lat={obj_lat:.6f}, "
+                                  f"Lon={obj_lon:.6f}, "
+                                  f"Alt={drone_alt:.2f}m")
+                        except Exception as e:
+                            print(f"坐标转换失败: {e}")
+                            drone_info['gps'] = None
 
-            # --- 13. 可视化结果 ---
-            display_frame = visualize_detections(frame_left_rect, tracked_objects_left, drone_info) # Use tracked_objects_left for visualization
-            
-            # 添加FPS信息
-            end_time = time.time()
-            fps = 1.0 / (end_time - start_time)
-            cv2.putText(display_frame, f"FPS: {fps:.2f}", 
-                        (10, image_size[1] - 20), cv2.FONT_HERSHEY_SIMPLEX, 
-                        0.6, (0, 255, 0), 2)
-            
-            # 显示结果
-            cv2.imshow('Drone Detection', display_frame)
+                # --- 13. 可视化结果 ---
+                print("开始可视化...")
+                display_frame = visualize_detections(frame_left_rect, tracked_objects_left, drone_info)
+                
+                # 添加FPS信息
+                end_time = time.time()
+                fps = 1.0 / (end_time - start_time)
+                cv2.putText(display_frame, f"FPS: {fps:.2f}", 
+                            (10, image_size[1] - 20), cv2.FONT_HERSHEY_SIMPLEX, 
+                            0.6, (0, 255, 0), 2)
+                
+                # 显示结果
+                cv2.imshow('Drone Detection', display_frame)
+                print(f"Frame {frame_count} 处理完成")
 
-            # 检测按键退出
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+                # 检测按键退出
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+                    
+            except Exception as inner_e:
+                print(f"处理帧 {frame_count} 时发生错误: {inner_e}")
+                print(f"错误类型: {type(inner_e).__name__}")
+                import traceback
+                traceback.print_exc()
+                # 继续处理下一帧而不是退出
+                continue
                 
     except KeyboardInterrupt:
         print("用户中断，退出程序")

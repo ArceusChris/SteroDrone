@@ -1,4 +1,4 @@
-\
+import cv2
 import numpy as np
 from ultralytics import YOLO
 
@@ -24,7 +24,7 @@ class DroneTracker:
                  track_buffer=30,  # Buffer to keep lost tracks (frames)
                  match_thresh=0.8, # Matching threshold for IOU
                  frame_rate=30,
-                 device='cuda'):
+                 device='cpu'):
         """
         Initializes the DroneTracker with YOLO model and ByteTrack.
 
@@ -38,9 +38,20 @@ class DroneTracker:
         """
         print(f"Loading YOLO model from {yolo_model_path}...")
         self.yolo_model = YOLO(yolo_model_path)
+        
+        # 强制设置设备
         if device == 'cuda':
-            self.yolo_model.to('cuda')
-        print("YOLO model loaded.")
+            try:
+                self.yolo_model.to('cuda')
+                print("YOLO model loaded on CUDA.")
+            except Exception as e:
+                print(f"CUDA不可用，切换到CPU: {e}")
+                device = 'cpu'
+                self.yolo_model.to('cpu')
+                print("YOLO model loaded on CPU.")
+        else:
+            self.yolo_model.to('cpu')
+            print("YOLO model loaded on CPU.")
 
         self.tracker = None
         if BYTETRACK_AVAILABLE:
@@ -78,13 +89,12 @@ class DroneTracker:
                 tracked_objects (ndarray): Array of [x_center, y_center, w, h, track_id].
                                            If tracking is disabled or fails, track_id might be a simple index.
                 raw_detections_xywh (ndarray): Array of [x_center, y_center, w, h] from YOLO.
-        """
-        # 1. YOLO Detection
-        yolo_results = self.yolo_model(image, verbose=False)
+        """        # 1. YOLO Detection
+        yolo_results = self.yolo_model(image, verbose=False, device='cpu')
         
-        raw_detections_xywh_list = []
-        # ByteTrack expects detections in [x1, y1, x2, y2, score] format
+        raw_detections_xywh_list = []        # ByteTrack expects detections in [x1, y1, x2, y2, score] format
         detections_for_bytetrack = [] 
+        raw_detections_xywh_list = []
 
         if yolo_results and yolo_results[0].boxes:
             raw_detections_xywh_list = yolo_results[0].boxes.xywh.cpu().numpy()
@@ -95,7 +105,8 @@ class DroneTracker:
                 # cls_id = int(box.cls[0].item()) # If you need class ID
                 detections_for_bytetrack.append([x1, y1, x2, y2, conf])
         
-        raw_detections_xywh = np.array(raw_detections_xywh_list) if raw_detections_xywh_list else np.empty((0, 4))
+        # 修复：正确处理numpy数组的空值判断
+        raw_detections_xywh = raw_detections_xywh_list if len(raw_detections_xywh_list) > 0 else np.empty((0, 4))
         detections_for_bytetrack_np = np.array(detections_for_bytetrack) if detections_for_bytetrack else np.empty((0, 5))
 
         # 2. ByteTrack Tracking

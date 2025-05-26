@@ -447,10 +447,9 @@ def main():
     stereo_matcher = StereoMatcher(image_size, P1, P2)
       # --- 5. 加载无人机检测模型 ---
     print("Initializing Drone Tracker (YOLO + ByteTrack)...")
-    try:
-        # Initialize the new DroneTracker (ByteTrack doesn't need reid_model_path)
-        drone_tracker_left = DroneTracker(yolo_model_path=model_path)
-        drone_tracker_right = DroneTracker(yolo_model_path=model_path)
+    try:        # Initialize the new DroneTracker (ByteTrack doesn't need reid_model_path)
+        drone_tracker_left = DroneTracker(yolo_model_path=model_path, device='cuda')
+        drone_tracker_right = DroneTracker(yolo_model_path=model_path, device='cuda')
         print("Drone Tracker initialized.")
     except Exception as e:
         print(f"Drone Tracker initialization failed: {e}")

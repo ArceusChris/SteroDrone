@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from ultralytics import YOLO
+import torch
 
 # Attempt to import ByteTrack
 try:
@@ -24,7 +25,7 @@ class DroneTracker:
                  track_buffer=30,  # Buffer to keep lost tracks (frames)
                  match_thresh=0.8, # Matching threshold for IOU
                  frame_rate=30,
-                 device='cpu'):
+                 device='cuda'):
         """
         Initializes the DroneTracker with YOLO model and ByteTrack.
 
@@ -39,17 +40,25 @@ class DroneTracker:
         print(f"Loading YOLO model from {yolo_model_path}...")
         self.yolo_model = YOLO(yolo_model_path)
         
-        # 强制设置设备
+        # 检查CUDA可用性并设置设备
         if device == 'cuda':
-            try:
-                self.yolo_model.to('cuda')
-                print("YOLO model loaded on CUDA.")
-            except Exception as e:
-                print(f"CUDA不可用，切换到CPU: {e}")
-                device = 'cpu'
+            if torch.cuda.is_available():
+                try:
+                    self.yolo_model.to('cuda')
+                    self.device = 'cuda'
+                    print(f"YOLO model loaded on CUDA (GPU: {torch.cuda.get_device_name(0)}).")
+                except Exception as e:
+                    print(f"CUDA设备设置失败，切换到CPU: {e}")
+                    self.device = 'cpu'
+                    self.yolo_model.to('cpu')
+                    print("YOLO model loaded on CPU.")
+            else:
+                print("CUDA不可用，使用CPU设备。")
+                self.device = 'cpu'
                 self.yolo_model.to('cpu')
                 print("YOLO model loaded on CPU.")
         else:
+            self.device = 'cpu'
             self.yolo_model.to('cpu')
             print("YOLO model loaded on CPU.")
 
@@ -89,14 +98,15 @@ class DroneTracker:
                 tracked_objects (ndarray): Array of [x_center, y_center, w, h, track_id].
                                            If tracking is disabled or fails, track_id might be a simple index.
                 raw_detections_xywh (ndarray): Array of [x_center, y_center, w, h] from YOLO.
-        """        # 1. YOLO Detection
-        yolo_results = self.yolo_model(image, verbose=False, device='cpu')
+        """
+        # 1. YOLO Detection - 使用配置的设备
+        yolo_results = self.yolo_model(image, verbose=False, device=self.device)
         
-        raw_detections_xywh_list = []        # ByteTrack expects detections in [x1, y1, x2, y2, score] format
+        # ByteTrack expects detections in [x1, y1, x2, y2, score] format
         detections_for_bytetrack = [] 
         raw_detections_xywh_list = []
 
-        if yolo_results and yolo_results[0].boxes:
+        if yolo_results and yolo_results[0].boxes is not None:
             raw_detections_xywh_list = yolo_results[0].boxes.xywh.cpu().numpy()
             
             for box in yolo_results[0].boxes:
